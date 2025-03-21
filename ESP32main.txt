@@ -1,0 +1,811 @@
+#include <HTTPClient.h>
+#include <WebSocketClient.h>
+#include <WiFi.h>
+#include <Adafruit_BMP085.h>
+#include <DHT.h>
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <Crypto.h>
+#include "CO2Sensor.h"
+#define DHTPIN 23
+#define DHTTYPE DHT22
+
+
+#define LightPin 36
+
+#define MoisturePin 39
+
+#define Co2Pin 35
+
+#define RELAY_1_FAN 13
+#define RELAY_2_PUMP 12
+#define RELAY_3_MOTOR_CW 27
+#define RELAY_4_MOTOR_CCW 26
+
+const char* ssid = "Jad";
+const char* password = "bineye123";
+String serverUrl = String("http://192.168.110.68:3002/api/v1/temprature/5d0nC7Sgglj8AhXi");
+String userCountUrl = String("http://192.168.110.68:3002/api/v1/deviceData/5d0nC7Sgglj8AhXi/userCount");
+String deviceSettingUrl = String("http://192.168.110.68:3002/5d0nC7Sgglj8AhXi/sensorSettings");
+String actuatorSettingUrl = String("http://192.168.110.68:3002/5d0nC7Sgglj8AhXi/actuatorSettings");
+const char* key = "Bu0n8TfJ8cieyGYB11Ajw5jUYpb4u2Uh";
+String packetUrl;
+
+char deviceId[] = "5d0nC7Sgglj8AhXi";
+char path[] = "/5d0nC7Sgglj8AhXi";
+char host[] = "192.168.110.68:3002";
+const unsigned short PORT = 3002;
+String result;
+HTTPClient http;
+WebSocketClient webSocketClient;
+WiFiClient client;
+mbedtls_aes_context aes;
+
+
+int tempratureSetting = 4, hummiditySetting = 4, moistureSetting = 4, carbon_dioxideSetting = 4, lightSetting = 4, pressureSetting = 4;
+bool sendTemperature, sendHumidity, sendMoisture, sendCarbon, sendLight, sendPressure;
+
+DHT dht(DHTPIN, DHTTYPE);
+
+Adafruit_BMP085 bmp;
+
+CO2Sensor co2Sensor(Co2Pin, 0.99, 100);
+
+char input[49];
+
+
+// Timer interval in microseconds (30 seconds)
+const int timerInterval = 10000000;
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+// Timer handle
+hw_timer_t* timer = NULL;
+volatile int num_of_interrupts = 0;
+
+//sensor Settings global variables
+int num_of_interrupts_temp = 2;
+int num_of_interrupts_hum = 2;
+int num_of_interrupts_light = 2;
+int num_of_interrupts_mois = 2;
+int num_of_interrupts_pres = 2;
+int num_of_interrupts_co2 = 2;
+
+
+//actuators Settings global variables
+//co2
+float minCo2Actuator1 = 0;
+float minCo2Actuator2 = 0;
+float minCo2Actuator3 = 0;
+
+float maxCo2Actuator1 = 0;
+float maxCo2Actuator2 = 0;
+float maxCo2Actuator3 = 0;
+
+//temp
+float minTempActuator1 = 0;
+float minTempActuator2 = 0;
+float minTempActuator3 = 0;
+
+float maxTempActuator1 = 0;
+float maxTempActuator2 = 0;
+float maxTempActuator3 = 0;
+
+
+//humi
+float minHumidityActuator1 = 0;
+float minHumidityActuator2 = 0;
+float minHumidityActuator3 = 0;
+
+float maxHumidityActuator1 = 0;
+float maxHumidityActuator2 = 0;
+float maxHumidityActuator3 = 0;
+
+//press
+float minPressureActuator1 = 0;
+float minPressureActuator2 = 0;
+float minPressureActuator3 = 0;
+
+float maxPressureActuator1 = 0;
+float maxPressureActuator2 = 0;
+float maxPressureActuator3 = 0;
+
+
+//light
+float minLightActuator1 = 0;
+float minLightActuator2 = 0;
+float minLightActuator3 = 0;
+
+float maxLightActuator1 = 0;
+float maxLightActuator2 = 0;
+float maxLightActuator3 = 0;
+
+
+//Moisture
+float minMoistureActuator1 = 0;
+float minMoistureActuator2 = 0;
+float minMoistureActuator3 = 0;
+
+float maxMoistureActuator1 = 0;
+float maxMoistureActuator2 = 0;
+float maxMoistureActuator3 = 0;
+
+//Store data
+float temperature = 0;
+float humidity = 0;
+int lightPercentage = 0;
+int moisturePercentage = 0;
+int pressure = 0;
+int co2PPM = 0;
+
+int motorPercentage = 0;
+//Relays
+void MotorOnCW(int time = 1) {
+  if (time < 1 || time > 4) return;
+
+  if (motorPercentage + time * 25 > 100) return;
+
+  digitalWrite(RELAY_4_MOTOR_CCW, HIGH);
+  digitalWrite(RELAY_3_MOTOR_CW, LOW);
+  motorPercentage += 25;
+  delay(time * 2000);  //time * 2 seconds
+}
+
+void MotorOnCCW(int time = 1) {
+  if (time < 1 || time > 4) return;
+
+  if (motorPercentage + time * 25 > 100) return;
+
+  digitalWrite(RELAY_3_MOTOR_CW, HIGH);
+  digitalWrite(RELAY_4_MOTOR_CCW, LOW);
+  motorPercentage -= 25;
+  delay(time * 2000);  //time * 2 seconds
+}
+
+void MotorOFF() {
+  digitalWrite(RELAY_4_MOTOR_CCW, HIGH);
+  digitalWrite(RELAY_3_MOTOR_CW, HIGH);
+  //or low low
+}
+
+void PumpON() {
+  digitalWrite(RELAY_2_PUMP, LOW);
+}
+
+void PumpOFF() {
+  digitalWrite(RELAY_2_PUMP, HIGH);
+}
+
+void FanON() {
+  digitalWrite(RELAY_1_FAN, LOW);
+}
+
+void FanOFF() {
+  digitalWrite(RELAY_1_FAN, HIGH);
+}
+
+void controlActuator1() {
+  if (((moisturePercentage < maxMoistureActuator1 && minMoistureActuator1 > minMoistureActuator1) || moisturePercentage > maxMoistureActuator1) && ((lightPercentage < maxLightActuator1 && lightPercentage > minLightActuator1) || lightPercentage > maxLightActuator1) && ((pressure < maxPressureActuator1 && pressure > minPressureActuator1) || pressure > maxPressureActuator1) && ((temperature < maxTempActuator1 && temperature > minTempActuator1) || temperature > maxTempActuator1) && ((co2PPM < maxCo2Actuator1 && co2PPM > minCo2Actuator1) || co2PPM > maxCo2Actuator1) && ((humidity < maxHumidityActuator1 && humidity > minHumidityActuator1) || humidity > maxHumidityActuator1)) {
+    PumpON();
+  } else {
+    PumpOFF();
+  }
+}
+
+
+void controlActuator2() {
+  if (((moisturePercentage <= maxMoistureActuator2 && moisturePercentage >= minMoistureActuator1)) && ((lightPercentage <= maxLightActuator2 && lightPercentage >= minLightActuator2)) && ((pressure <= maxPressureActuator2 && pressure >= minPressureActuator2)) && ((temperature <= maxTempActuator2 && temperature >= minTempActuator2)) && ((co2PPM <= maxCo2Actuator2 && co2PPM >= minCo2Actuator2)) && ((humidity <= maxHumidityActuator2 && humidity >= minHumidityActuator2))) {
+    //Serial.println("Fan on");
+    FanON();
+  } else {
+    //Serial.println("Fan off");
+    FanOFF();
+  }
+}
+
+void controlActuator3() {
+  if ((moisturePercentage <= maxMoistureActuator3 && moisturePercentage >= minMoistureActuator3) && (lightPercentage <= maxLightActuator3 && lightPercentage >= minLightActuator3) && (pressure <= maxPressureActuator3 && pressure >= minPressureActuator3) && (temperature <= maxTempActuator3 && temperature >= minTempActuator3) && (co2PPM <= maxCo2Actuator3 && co2PPM >= minCo2Actuator3) && (humidity <= maxHumidityActuator3 && humidity >= minHumidityActuator3)) {
+    MotorOnCW(1);
+  } else {
+    MotorOFF(
+
+    );
+  }
+}
+
+
+
+
+
+
+
+
+
+
+
+void connectSocket() {
+  //client.connect("192.168.0.4", 3002);
+  webSocketClient.path = path;
+  webSocketClient.host = host;
+
+  Serial.println("");
+  Serial.println("WiFi connected");
+  Serial.println("IP address: ");
+  Serial.println(WiFi.localIP());
+
+  while (!client.connect("192.168.110.68", PORT)) {
+    Serial.println("Connection to socket failed.");
+    delay(500);
+  }
+  while (!webSocketClient.handshake(client)) {
+    Serial.println("Handshake with the socker failed.");
+    delay(500);
+  }
+  Serial.println("Connection to socket successed.");
+}
+
+void connectWifi() {
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi...");
+  }
+  Serial.println("Connected to WiFi");
+}
+
+void addPadding(char* input, size_t inputLength) {  //PCKS5 PADDING
+  // Calculate the number of bytes needed for padding
+  size_t paddingLength = 16 - (inputLength % 16);
+
+  // Add padding bytes with value equal to the number of padding bytes
+  for (size_t i = 0; i < paddingLength; i++) {
+    input[inputLength + i] = (char)paddingLength;
+  }
+}
+
+String encryptPacket(char* input, size_t inputLength) {
+  String result = "";
+  addPadding(input, inputLength);
+  // Perform AES-256 encryption on each block (16 bytes)
+  for (size_t i = 0; i < inputLength; i += 16) {
+    unsigned char output[16];
+    mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, (const unsigned char*)(input + i), output);
+
+    // Append to the result string without redeclaring it
+    for (int j = 0; j < 16; j++) {
+      char str[3];
+      sprintf(str, "%02x", (int)output[j]);
+      result = result + str;
+    }
+  }
+  return result;
+}
+
+bool sendPacket(char* input, size_t inputLength, String endpoint) {
+  http.begin(endpoint);
+
+  // Set content type
+  http.addHeader("Content-Type", "application/json");
+
+  // Create a JSON document
+  StaticJsonDocument<200> doc;
+  doc["encryptedData"] = encryptPacket(input, inputLength);
+
+  // Serialize JSON to a string
+  String jsonString;
+  serializeJson(doc, jsonString);
+  // Send POST request
+  int httpResponseCode = http.POST(jsonString);
+  // Check for successful response
+  if (httpResponseCode == 200) {
+    // Serial.print("HTTP Response code: ");
+    Serial.println(httpResponseCode);
+    String payload = http.getString();
+    Serial.println("Response payload: " + payload);
+    return true;
+    // String payload = http.getString();
+    // Serial.println("Response payload: " + payload);
+    Serial.println(httpResponseCode);
+  } else {
+    // Serial.print("HTTP POST request failed. Error code: ");
+    // Serial.println(httpResponseCode);
+    return false;
+  }
+
+  // Close connection
+  http.end();
+}
+
+void getSensorSettings() {
+  http.begin(deviceSettingUrl);
+  http.addHeader("Content-Type", "application/json");
+
+
+  StaticJsonDocument<200> doc;
+  char data[49];
+  snprintf(data, sizeof(data), "{\"deviceId\":\"%s\"}", deviceId);
+  doc["encryptedData"] = encryptPacket(data, strlen(data));
+
+
+
+
+  String jsonString;
+  serializeJson(doc, jsonString);
+  Serial.print(jsonString);
+  int httpCode = http.POST(jsonString);
+  if (httpCode > 0) {
+    String payload = http.getString();
+    StaticJsonDocument<200> doc;
+
+    // Deserialize the JSON document
+    DeserializationError error = deserializeJson(doc, payload);
+
+    // Test if parsing succeeds.
+    if (error) {
+      Serial.print(F("deserializeJson() failed: "));
+      Serial.println(error.f_str());
+      return;
+    }
+
+    // Get the sensor settings
+    JsonObject sensor_setting = doc["sensor_setting"];
+
+    num_of_interrupts_temp = sensor_setting["temprature"];
+    num_of_interrupts_hum = sensor_setting["hummidity"];
+    num_of_interrupts_mois = sensor_setting["moisture"];
+    num_of_interrupts_co2 = sensor_setting["carbon_dioxide"];
+    num_of_interrupts_light = sensor_setting["light"];
+    num_of_interrupts_pres = sensor_setting["pressure"];
+  }
+
+  return;
+}
+
+void getActuatorSettings() {
+  http.begin(actuatorSettingUrl);
+  http.addHeader("Content-Type", "application/json");
+
+
+  StaticJsonDocument<200> doc;
+  char data[49];
+  snprintf(data, sizeof(data), "{\"deviceId\":\"%s\"}", deviceId);
+  doc["encryptedData"] = encryptPacket(data, strlen(data));
+
+
+
+
+  String jsonString;
+  serializeJson(doc, jsonString);
+  Serial.print(jsonString);
+  int httpCode = http.POST(jsonString);
+  if (httpCode > 0) {
+    String payload = http.getString();
+    Serial.print(payload);
+    StaticJsonDocument<200> doc;
+
+    // Deserialize the JSON document
+    DeserializationError error = deserializeJson(doc, payload);
+
+    // Test if parsing succeeds.
+    if (error) {
+      return;
+    }
+
+    JsonObject actuatorSetting = doc["actuator_setting"][0];
+    JsonObject actuator1 = actuatorSetting["actuator_1"];
+    JsonObject actuator2 = actuatorSetting["actuator_2"];
+    JsonObject actuator3 = actuatorSetting["actuator_3"];
+
+    //extract Temp
+    minTempActuator1 = actuator1["min_temp"];
+    maxTempActuator1 = actuator1["max_temp"];
+
+    minTempActuator2 = actuator2["min_temp"];
+    maxTempActuator2 = actuator2["max_temp"];
+
+    minTempActuator3 = actuator3["min_temp"];
+    maxTempActuator3 = actuator3["max_temp"];
+
+    //extract Humi
+    minHumidityActuator1 = actuator1["min_humidity"];
+    maxHumidityActuator1 = actuator1["max_humidity"];
+
+    minHumidityActuator2 = actuator2["min_humidity"];
+    maxHumidityActuator2 = actuator2["max_humidity"];
+
+    minHumidityActuator3 = actuator3["min_humidity"];
+    maxHumidityActuator3 = actuator3["max_humidity"];
+
+    //extract Co2
+    minCo2Actuator1 = actuator1["min_co2"];
+    maxCo2Actuator1 = actuator1["max_co2"];
+
+    minCo2Actuator2 = actuator2["min_co2"];
+    maxCo2Actuator2 = actuator2["max_co2"];
+
+    minCo2Actuator3 = actuator3["min_co2"];
+    maxCo2Actuator3 = actuator3["max_co2"];
+
+
+    //extract Press
+    minPressureActuator1 = actuator1["min_pressure"];
+    maxPressureActuator1 = actuator1["max_pressure"];
+
+    minPressureActuator2 = actuator2["min_pressure"];
+    maxPressureActuator2 = actuator2["max_pressure"];
+
+    minPressureActuator3 = actuator3["min_pressure"];
+    maxPressureActuator3 = actuator3["max_pressure"];
+
+    //extract Light
+    minLightActuator1 = actuator1["min_light"];
+    maxLightActuator1 = actuator1["max_light"];
+
+    minLightActuator2 = actuator2["min_light"];
+    maxLightActuator2 = actuator2["max_light"];
+
+    minLightActuator3 = actuator3["min_light"];
+    maxLightActuator3 = actuator3["max_light"];
+
+    //extract Moisture
+    minMoistureActuator1 = actuator1["min_moisture"];
+    maxMoistureActuator1 = actuator1["max_moisture"];
+
+    minMoistureActuator2 = actuator2["min_moisture"];
+    maxMoistureActuator2 = actuator2["max_moisture"];
+
+    minMoistureActuator3 = actuator3["min_moisture"];
+    maxMoistureActuator3 = actuator3["max_moisture"];
+  }
+
+  return;
+}
+
+int getUserCount() {
+  http.begin(userCountUrl);
+  if (http.GET() == 200) {
+    String payload = http.getString();
+    StaticJsonDocument<200> doc;
+    deserializeJson(doc, payload);
+    return doc["userCount"];
+  }
+  return 0;
+}
+
+void printVariables() {
+  Serial.println("CO2 variables:");
+  Serial.print("minCo2Actuator1: ");
+  Serial.println(minCo2Actuator1);
+  Serial.print("minCo2Actuator2: ");
+  Serial.println(minCo2Actuator2);
+  Serial.print("minCo2Actuator3: ");
+  Serial.println(minCo2Actuator3);
+  Serial.print("maxCo2Actuator1: ");
+  Serial.println(maxCo2Actuator1);
+  Serial.print("maxCo2Actuator2: ");
+  Serial.println(maxCo2Actuator2);
+  Serial.print("maxCo2Actuator3: ");
+  Serial.println(maxCo2Actuator3);
+
+  // Repeat for other variables (temperature, humidity, pressure, light, moisture)
+}
+
+float randomFloat(float min, float max) {
+  return min + (max - min) * random(100) / 100.0;
+}
+
+
+
+// Timer interrupt function
+void IRAM_ATTR onTimer() {
+  portENTER_CRITICAL_ISR(&timerMux);
+  // Your interrupt code here
+  // This function will be called every 30 seconds
+  num_of_interrupts++;
+
+  if (num_of_interrupts == 2879) {
+    num_of_interrupts = 1;
+  }
+  if (num_of_interrupts % num_of_interrupts_temp == 0) {
+
+
+    Serial.print("[temp]:");
+    //read input from sensor
+    //float temperature = dht.readTemperature();
+    // if (isnan(temperature)) {
+    //   Serial.println(F("Failed to read from DHT sensor! Temperature"));
+    //   return;
+    // }
+
+    //packet stuff
+    // snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"temp\":\"%.1f\"}", deviceId, temperature);
+    sendTemperature = true;
+    packetUrl = "http://192.168.110.68:3002/api/v1/temprature/5d0nC7Sgglj8AhXi";
+  }
+
+  if (num_of_interrupts % num_of_interrupts_hum == 0) {
+    Serial.println("hum");
+    //read input from sensor
+    //float humidity = dht.readHumidity();
+    // if (isnan(humidity)) {
+    //   Serial.println(("Failed to read from DHT sensor! Humidity"));
+    //   return;
+    // }
+
+    //packet stuff
+    // snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"humi\":\"%.1f\"}", deviceId, humidity);
+    sendHumidity = true;
+    packetUrl = "http://192.168.110.68:3002/api/v1/hummidity/5d0nC7Sgglj8AhXi";
+  }
+
+  if (num_of_interrupts % num_of_interrupts_light == 0) {
+    Serial.println("light");
+    sendLight = true;
+    //read input from sensor
+    // int lightAdcValue = analogRead(LightPin);
+    //int lightPercentage = map(lightAdcValue, 0, 4095, 0, 100);
+    //packet stuff
+
+    // snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"ligt\":\"%3d\"}", deviceId, lightPercentage);
+    packetUrl = "http://192.168.110.68:3002/api/v1/light/5d0nC7Sgglj8AhXi";
+    Serial.println(serverUrl);
+  }
+
+  if (num_of_interrupts % num_of_interrupts_mois == 0) {
+    Serial.println("mois");
+    //read input from sensor
+    //int soilAdcValue = analogRead(MoisturePin); // read analog sensor value
+    //int moisturePercentage = map(soilAdcValue, 0, 4095, 100, 0); // calculate moisture value in percentage
+
+    //packet stuff
+    // snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"mois\":\"%3d\"}", deviceId, moisturePercentage);
+    sendMoisture = true;
+    packetUrl = "http://192.168.110.68:3002/api/v1/moisture/5d0nC7Sgglj8AhXi";
+  }
+  if (num_of_interrupts % num_of_interrupts_pres == 0) {
+    Serial.println("pres");
+    sendPressure = true;
+    //int pressure = bmp.readPressure() / 1000; //Kilo Pascals
+  }
+
+  if (num_of_interrupts % num_of_interrupts_co2 == 0) {
+    Serial.println("co2");
+    sendCarbon = true;
+    //read input from sensor
+    //int co2PPM = co2Sensor.read();
+
+    //packet stuff
+    // snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"carb\":\"%4d\"}", deviceId, co2PPM);
+    packetUrl = "http://192.168.110.68:3002/api/v1/carbon/5d0nC7Sgglj8AhXi";
+  }
+  // Clear the interrupt flag
+  timerAlarmWrite(timer, timerInterval, true);
+
+  portEXIT_CRITICAL_ISR(&timerMux);
+}
+
+void setup() {
+
+  FanOFF();
+  MotorOFF();
+  PumpOFF();
+
+  //selecting the BaudRate
+  Serial.begin(115200);
+
+  randomSeed(millis());
+
+
+
+  //connecting to wifi
+  connectWifi();
+
+
+  //Initialize encryption method
+  mbedtls_aes_init(&aes);
+  mbedtls_aes_setkey_enc(&aes, (const unsigned char*)key, 256);  //set  the key of aes-256-ecb
+
+
+  // Set up and attach the timer interrupt
+  timer = timerBegin(0, 80, true);              // Timer 0, prescaler 80 (1 tick = 1 microsecond)
+  timerAttachInterrupt(timer, &onTimer, true);  // Attach the interrupt
+  timerAlarmWrite(timer, timerInterval, true);  // Set the timer interval and auto-reload
+  timerAlarmEnable(timer);                      // Enable the timer interrupt
+
+  int userCount = getUserCount();
+  while (userCount == 0) {
+    delay(3000);
+    Serial.println(num_of_interrupts_temp);
+  }
+  getSensorSettings();
+  getActuatorSettings();
+  printVariables();
+
+  dht.begin();
+  bmp.begin();
+  co2Sensor.calibrate();
+
+  pinMode(RELAY_1_FAN, OUTPUT);
+  pinMode(RELAY_2_PUMP, OUTPUT);
+  pinMode(RELAY_3_MOTOR_CW, OUTPUT);
+  pinMode(RELAY_4_MOTOR_CCW, OUTPUT);
+}
+
+void loop() {
+
+  String data;
+  if (WiFi.status() == WL_CONNECTED && client.connected()) {
+
+
+    if (sendTemperature) {
+      sendTemperature = false;
+      getSensorSettings();
+      getActuatorSettings();
+      fun_sendTemperature();
+    }
+
+    if (sendHumidity) {
+      sendHumidity = false;
+      getSensorSettings();
+      getActuatorSettings();
+      fun_sendHummidity();
+    }
+
+    if (sendCarbon) {
+      sendCarbon = false;
+      getSensorSettings();
+      getActuatorSettings();
+      fun_sendCarbon();
+    }
+
+    if (sendPressure) {
+      sendPressure = false;
+      getSensorSettings();
+      getActuatorSettings();
+      fun_sendPressure();
+    }
+
+
+
+    if (sendLight) {
+      sendLight = false;
+      getSensorSettings();
+      getActuatorSettings();
+      fun_sendLight();
+    }
+
+    if (sendMoisture) {
+      sendMoisture = false;
+      getSensorSettings();
+      getActuatorSettings();
+      fun_sendMoisture();
+    }
+    return;
+  } else {
+    connectWifi();
+    connectSocket();
+  }
+}
+
+void fun_sendTemperature() {
+  temperature = randomFloat(24.00,26.00);
+  Serial.print("[temp]:");
+  //temperature = dht.readTemperature();
+  if (isnan(temperature)) {
+    Serial.println(F("Failed to read from DHT sensor! Temperature"));
+    return;
+  }
+
+  //Packet stuff
+  snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"temp\":\"%.1f\"}", deviceId, temperature);
+  packetUrl = "http://192.168.110.68:3002/api/v1/temprature/5d0nC7Sgglj8AhXi";
+
+  int inputLength = strlen(input);
+  while (!sendPacket(input, inputLength, packetUrl)) {
+    Serial.println("[ERROR]: Packet was not sent.");
+    Serial.print("[Input]:");
+    Serial.println(input);
+    delay(1000);
+  }
+}
+
+
+void fun_sendHummidity() {
+  humidity = randomFloat(72.00,75.00);
+  Serial.println("hum");
+  //humidity = dht.readHumidity();
+  if (isnan(humidity)) {
+    Serial.println(("Failed to read from DHT sensor! Humidity"));
+    return;
+  }
+
+  //packet stuff
+  snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"humi\":\"%.1f\"}", deviceId, humidity);
+  packetUrl = "http://192.168.110.68:3002/api/v1/hummidity/5d0nC7Sgglj8AhXi";
+
+  int inputLength = strlen(input);
+  while (!sendPacket(input, inputLength, packetUrl)) {
+    Serial.println("[ERROR]: Packet was not sent.");
+    Serial.print("[Input]:");
+    Serial.println(input);
+    delay(1000);
+  }
+}
+
+void fun_sendCarbon() {
+  co2PPM = random(300, 700);
+  Serial.println("co2");
+  //co2PPM = co2Sensor.read();
+
+  //packet stuff
+  snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"carb\":\"%4d\"}", deviceId, co2PPM);
+  packetUrl = "http://192.168.110.68:3002/api/v1/carbon/5d0nC7Sgglj8AhXi";
+
+  int inputLength = strlen(input);
+  while (!sendPacket(input, inputLength, packetUrl)) {
+    Serial.println("[ERROR]: Packet was not sent.");
+    Serial.print("[Input]:");
+    Serial.println(input);
+    delay(1000);
+  }
+}
+
+
+void fun_sendLight() {
+
+  //lightPercentage = random(0, 100);
+
+  Serial.println("light");
+  int lightAdcValue = analogRead(LightPin);
+  lightPercentage = map(lightAdcValue, 0, 4095, 0, 100);
+
+  //packet stuff
+  snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"ligt\":\"%3d\"}", deviceId, lightPercentage);
+  packetUrl = "http://192.168.110.68:3002/api/v1/light/5d0nC7Sgglj8AhXi";
+
+
+  int inputLength = strlen(input);
+  while (!sendPacket(input, inputLength, packetUrl)) {
+    Serial.println("[ERROR]: Packet was not sent.");
+    Serial.print("[Input]:");
+    Serial.println(input);
+    delay(1000);
+  }
+}
+
+void fun_sendPressure() {
+  pressure = random(97, 98);
+  Serial.println("pres");
+  //pressure = bmp.readPressure() / 1000;  //Kilo Pascals
+
+  //packet stuff
+  snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"pres\":\"%4d\"}", deviceId, pressure);
+  packetUrl = "http://192.168.110.68:3002/api/v1/pressure/5d0nC7Sgglj8AhXi";
+
+  int inputLength = strlen(input);
+  while (!sendPacket(input, inputLength, packetUrl)) {
+    Serial.println("[ERROR]: Packet was not sent.");
+    Serial.print("[Input]:");
+    Serial.println(input);
+    delay(1000);
+  }
+}
+
+
+void fun_sendMoisture() {
+  moisturePercentage = random(0, 11);
+
+  Serial.println("mois");
+  // int soilAdcValue = analogRead(MoisturePin);               // read analog sensor value
+  // moisturePercentage = map(soilAdcValue, 0, 4095, 100, 0);  // calculate moisture value in percentage
+
+  //packet stuff
+  snprintf(input, sizeof(input), "{\"deviceId\":\"%s\",\"mois\":\"%3d\"}", deviceId, moisturePercentage);
+  sendMoisture = false;
+  packetUrl = "http://192.168.110.68:3002/api/v1/moisture/5d0nC7Sgglj8AhXi";
+  int inputLength = strlen(input);
+  while (!sendPacket(input, inputLength, packetUrl)) {
+    Serial.println("[ERROR]: Packet was not sent.");
+    Serial.print("[Input]:");
+    Serial.println(input);
+    delay(1000);
+  }
+}

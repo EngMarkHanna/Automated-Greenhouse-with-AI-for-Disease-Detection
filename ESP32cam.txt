@@ -1,0 +1,140 @@
+#include "esp_camera.h"
+#include "Arduino.h"
+#include "soc/soc.h"           // Disable brownour problems
+#include "soc/rtc_cntl_reg.h"  // Disable brownour problems
+
+#include <WiFi.h>
+#include <WiFiClient.h>
+#include <HTTPClient.h>
+
+#define CAMERA_MODEL_AI_THINKER
+
+// Pin definition for CAMERA_MODEL_AI_THINKER
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
+
+#define FLASH_LED_PIN 4
+
+// REPLACE WITH YOUR NETWORK CREDENTIALS
+const char* ssid = "Nice";
+const char* password = "123456789";
+
+// Server information                                 //Device ID
+const char* serverName = "http://192.168.154.129:8000/WXF10/upload/Cucumber";  // URL endpoint to send the POST request
+const char* serverIP = "192.168.154.129";
+
+void setup(){
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+  Serial.begin(115200);
+
+
+  
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("WiFi connected");
+  
+  pinMode(FLASH_LED_PIN, OUTPUT);  // Ensure the flash LED pin is set as an output
+  
+  camera_config_t config;
+  config.ledc_channel = LEDC_CHANNEL_0;
+  config.ledc_timer = LEDC_TIMER_0;
+  config.pin_d0 = Y2_GPIO_NUM;
+  config.pin_d1 = Y3_GPIO_NUM;
+  config.pin_d2 = Y4_GPIO_NUM;
+  config.pin_d3 = Y5_GPIO_NUM;
+  config.pin_d4 = Y6_GPIO_NUM;
+  config.pin_d5 = Y7_GPIO_NUM;
+  config.pin_d6 = Y8_GPIO_NUM;
+  config.pin_d7 = Y9_GPIO_NUM;
+  config.pin_xclk = XCLK_GPIO_NUM;
+  config.pin_pclk = PCLK_GPIO_NUM;
+  config.pin_vsync = VSYNC_GPIO_NUM;
+  config.pin_href = HREF_GPIO_NUM;
+  config.pin_sscb_sda = SIOD_GPIO_NUM;
+  config.pin_sscb_scl = SIOC_GPIO_NUM;
+  config.pin_pwdn = PWDN_GPIO_NUM;
+  config.pin_reset = RESET_GPIO_NUM;
+  config.xclk_freq_hz = 20000000;
+  config.pixel_format = PIXFORMAT_JPEG; 
+
+    // init with high specs to pre-allocate larger buffers
+  if(psramFound()){
+    config.frame_size = FRAMESIZE_UXGA; // FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
+    config.jpeg_quality = 10;
+    config.fb_count = 2;
+  } else {
+    config.frame_size = FRAMESIZE_SVGA;
+    config.jpeg_quality = 12;
+    config.fb_count = 1;
+  }
+
+  // Init Camera
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x", err);
+    return;
+  }
+
+}
+
+
+
+void loop(){
+  Serial.print("Hello there!");
+  camera_fb_t * fb = NULL;
+
+  digitalWrite(FLASH_LED_PIN, HIGH);  // Turn on the flash
+  delay(1000);
+  fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("\nCamera capture failed");
+    return;
+  }
+  delay(500);
+  digitalWrite(FLASH_LED_PIN, LOW);  // Turn on the flash
+  Serial.println("\nCamera capture success");
+
+  Serial.println("Connecting to server: ");
+  WiFiClient client;
+  if (client.connect(serverIP, 80)) {
+    Serial.println("Connection successful!");    
+     // Create HTTP POST request
+    HTTPClient http;
+    http.begin(serverName);  // Initialize the HTTP client with the server URL
+    http.addHeader("Content-Type", "application/octet-stream");  // Specify the content type for binary data
+    // Send the POST request with the image data
+    int httpResponseCode = http.POST(fb->buf, fb->len);
+
+    if (httpResponseCode > 0) {
+        Serial.printf("HTTP Response code: %d\n", httpResponseCode);
+    } else {
+        Serial.printf("Error on sending POST: %s\n", http.errorToString(httpResponseCode).c_str());
+    }
+
+    // Clean up
+    http.end();
+  } else {
+    Serial.println("Connection failed!");
+  }
+
+  esp_camera_fb_return(fb);
+  delay(30000);
+}
