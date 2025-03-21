@@ -1,0 +1,1 @@
+# Automated-Greenhouse-with-AI-for-Disease-Detection
